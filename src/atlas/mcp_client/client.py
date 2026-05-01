@@ -1,0 +1,233 @@
+"""Atlas MCP client gateway against CK MCP server.
+
+Connects to https://sloan3.tail1216a3.ts.net:8443/mcp via streamablehttp_client.
+MCP-Protocol-Version: 2025-03-26 header required by FastMCP 1.26+ server
+(banked Phase 3 directive, ratified commit 77759f8).
+Cert SAN is FQDN-only; /etc/hosts entry on Beast (192.168.1.10
+sloan3.tail1216a3.ts.net) bridges FQDN cert validation with LAN routing per
+Cycle 1A Path B continuation.
+
+Client-side ACL applied before network call (server-side ACL is v0.2 P5).
+Telemetry to atlas.events with source='atlas.mcp_client'; arg VALUES never
+persisted (secrets discipline).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from typing import Any
+
+import structlog
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+from atlas.db import Database
+from atlas.inference.telemetry import _ns_to_ms
+from atlas.mcp_client.acl import AtlasAclDenied, check_acl
+
+log = structlog.get_logger(__name__)
+
+DEFAULT_MCP_URL = os.getenv(
+    "ATLAS_MCP_URL", "https://sloan3.tail1216a3.ts.net:8443/mcp"
+)
+MCP_PROTOCOL_VERSION = "2025-03-26"
+DEFAULT_HEADERS: dict[str, str] = {"MCP-Protocol-Version": MCP_PROTOCOL_VERSION}
+
+
+class McpClient:
+    """Async wrapper around mcp.ClientSession over streamablehttp_client.
+
+    Use as async context manager:
+
+        async with McpClient() as client:
+            tools = await client.list_tools()
+            result = await client.call_tool("homelab_ssh_run", {...})
+
+    Pass db= for telemetry to atlas.events. Without db, events fall back to
+    structlog.info() only.
+    """
+
+    def __init__(
+        self,
+        *,
+        url: str | None = None,
+        headers: dict[str, str] | None = None,
+        db: Database | None = None,
+    ) -> None:
+        self._url = url or DEFAULT_MCP_URL
+        self._headers = headers or DEFAULT_HEADERS
+        self._db = db
+        self._transport_cm = None
+        self._session_cm = None
+        self._session: ClientSession | None = None
+        self._tool_schemas: dict[str, dict] = {}
+
+    async def __aenter__(self) -> "McpClient":
+        self._transport_cm = streamablehttp_client(
+            self._url, headers=self._headers
+        )
+        streams = await self._transport_cm.__aenter__()
+        read_stream, write_stream, _close = streams
+        self._session_cm = ClientSession(read_stream, write_stream)
+        self._session = await self._session_cm.__aenter__()
+        await self._session.initialize()
+        # Cache tool schemas for schema-aware auto-wrap (Option B, ratified commit 6eaab4e)
+        self._tool_schemas = {}
+        list_result = await self._session.list_tools()
+        for t in list_result.tools:
+            self._tool_schemas[t.name] = t.inputSchema or {}
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._session_cm is not None:
+            await self._session_cm.__aexit__(exc_type, exc, tb)
+        if self._transport_cm is not None:
+            await self._transport_cm.__aexit__(exc_type, exc, tb)
+        self._session = None
+        self._session_cm = None
+        self._transport_cm = None
+
+    async def list_tools(self) -> list:
+        """Fetch MCP tool registry. Logs telemetry to atlas.events."""
+        if self._session is None:
+            raise RuntimeError(
+                "McpClient not entered (use 'async with McpClient()...')"
+            )
+        t0 = time.perf_counter_ns()
+        try:
+            result = await self._session.list_tools()
+            tools = result.tools
+            await self._log_event(
+                kind="tools_list",
+                payload={
+                    "tool_name": None,
+                    "arg_keys": [],
+                    "status": "success",
+                    "duration_ms": _ns_to_ms(time.perf_counter_ns() - t0),
+                    "endpoint": self._url,
+                    "tools_count": len(tools),
+                },
+            )
+            return tools
+        except Exception as e:
+            await self._log_event(
+                kind="tools_list",
+                payload={
+                    "tool_name": None,
+                    "arg_keys": [],
+                    "status": "error",
+                    "duration_ms": _ns_to_ms(time.perf_counter_ns() - t0),
+                    "endpoint": self._url,
+                    "error": str(e)[:200],
+                },
+            )
+            raise
+
+    async def call_tool(self, name: str, arguments: dict | None = None) -> Any:
+        """Call MCP tool with client-side ACL check. Logs telemetry.
+
+        SECRETS DISCIPLINE: argument VALUES are never logged to atlas.events.
+        Only tool_name + sorted(arg_keys) + status + duration_ms + endpoint.
+        """
+        if self._session is None:
+            raise RuntimeError(
+                "McpClient not entered (use 'async with McpClient()...')"
+            )
+        args = arguments or {}
+        # Capture caller's arg keys BEFORE auto-wrap (telemetry intelligibility +
+        # secrets discipline preservation per Refinement 3 of Option B ruling).
+        caller_arg_keys = sorted(args.keys())
+        # Schema-aware auto-wrap: if tool's inputSchema requires `params` wrapper
+        # (FastMCP Pydantic-wrapped handlers) and caller passed flat args, wrap
+        # them. Refinement 1 of Option B: schemas cached at __aenter__.
+        schema = self._tool_schemas.get(name, {})
+        if (
+            schema.get("required") == ["params"]
+            and "params" in schema.get("properties", {})
+            and "params" not in args
+        ):
+            args = {"params": args}
+        # ACL check BEFORE network call -- raises AtlasAclDenied; no nginx hit.
+        # Refinement 2 of Option B: check_acl handles both wrapped + unwrapped.
+        try:
+            check_acl(name, args)
+        except AtlasAclDenied as e:
+            await self._log_event(
+                kind="tool_call_denied",
+                payload={
+                    "tool_name": name,
+                    "arg_keys": caller_arg_keys,
+                    "status": "denied",
+                    "duration_ms": 0.0,
+                    "endpoint": self._url,
+                    "reason": str(e)[:200],
+                },
+            )
+            raise
+        t0 = time.perf_counter_ns()
+        try:
+            result = await self._session.call_tool(name, args)
+            await self._log_event(
+                kind="tool_call",
+                payload={
+                    "tool_name": name,
+                    "arg_keys": caller_arg_keys,
+                    "status": "success",
+                    "duration_ms": _ns_to_ms(time.perf_counter_ns() - t0),
+                    "endpoint": self._url,
+                },
+            )
+            return result
+        except Exception as e:
+            await self._log_event(
+                kind="tool_call",
+                payload={
+                    "tool_name": name,
+                    "arg_keys": caller_arg_keys,
+                    "status": "error",
+                    "duration_ms": _ns_to_ms(time.perf_counter_ns() - t0),
+                    "endpoint": self._url,
+                    "error": str(e)[:200],
+                },
+            )
+            raise
+
+    async def _log_event(self, *, kind: str, payload: dict) -> None:
+        """Insert one row into atlas.events with source='atlas.mcp_client'.
+
+        SECRETS DISCIPLINE: payload contains tool_name + arg_keys (NOT arg
+        values), status, duration_ms, endpoint. Tool argument VALUES are
+        never persisted -- they may contain credentials, file paths with
+        sensitive data, or arbitrary user input.
+
+        Falls back to structlog.info() if no db is wired.
+        """
+        if self._db is None:
+            log.info("mcp_event", kind=kind, **payload)
+            return
+        async with self._db.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO atlas.events (source, kind, payload) "
+                    "VALUES (%s, %s, %s::jsonb)",
+                    (
+                        "atlas.mcp_client",
+                        kind,
+                        json.dumps(payload, default=str),
+                    ),
+                )
+                await conn.commit()
+
+
+def get_mcp_client(*, db: Database | None = None) -> McpClient:
+    """Factory for default-configured McpClient.
+
+    Returns un-entered instance; caller uses async context manager:
+
+        client = get_mcp_client(db=db)
+        async with client:
+            tools = await client.list_tools()
+    """
+    return McpClient(db=db)
