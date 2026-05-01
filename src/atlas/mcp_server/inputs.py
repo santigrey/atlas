@@ -19,6 +19,7 @@ EVENTS_SOURCE_ALLOWLIST = {
     "atlas.inference",
     "atlas.mcp_client",
     "atlas.mcp_server",
+    "alexandra",
 }
 
 # Status allowlist for tasks list filter (Cycle 1I)
