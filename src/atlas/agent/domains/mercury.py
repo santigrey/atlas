@@ -43,7 +43,7 @@ Tier mapping (per Atlas SOP v1.0 Section 3.2):
 - Tier 3 / severity='critical' = mercury-scanner down OR real-money trades without ratification
 
 Weak credential note (P5 candidate Atlas v0.1.1): Mercury .env on CK contains
-DATABASE_URL with literal 'adminpass' password. Pre-existing state, not introduced
+DATABASE_URL with a weak password embedded inline. Pre-existing state, not introduced
 by Phase 6. Atlas v0.1.1 hardening cycle should rotate to strong password +
 introduce read-only mercury_reader role.
 """
