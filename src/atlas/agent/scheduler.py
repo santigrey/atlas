@@ -14,6 +14,11 @@ Phase 5 Day 78 wiring (Vendor & admin):
 - tailscale_authkey_check: daily at-or-after 06:00 UTC, once per UTC date
 - github_pat_check: daily at-or-after 06:00 UTC, once per UTC date
 
+Phase 6 Day 78 wiring (Mercury supervision):
+- mercury_liveness_check: every 5min (capital protection: alert if scanner down)
+- mercury_real_money_failclosed: every 5min (continuous gate; Tier 3 immediate)
+- mercury_trade_activity_check: daily at-or-after 08:00 UTC, once per UTC date
+
 First tick at scheduler start fires all due cycles immediately (last_run empty -> due);
 wall-clock-anchored cadences fire only when the wall-clock window is open.
 Each domain call is wrapped in try/except so one failure does not poison the cadence dict
@@ -40,6 +45,11 @@ from atlas.agent.domains.vendor import (
     tailscale_authkey_check,
     vendor_renewal_check,
 )
+from atlas.agent.domains.mercury import (
+    mercury_liveness_check,
+    mercury_real_money_failclosed,
+    mercury_trade_activity_check,
+)
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +57,7 @@ log = logging.getLogger(__name__)
 CADENCE_VITALS_S = 300       # 5 minutes
 CADENCE_UPTIME_S = 300       # 5 minutes (Sloan directive Day 78; spec said 1min -- 5min ratified)
 CADENCE_ANCHOR_S = 3600      # 1 hour
+CADENCE_MERCURY_S = 300      # 5 minutes for liveness + real-money fail-closed
 TICK_INTERVAL_S = 60         # 1-minute scheduler tick
 
 # Wall-clock-anchored cadences (Phase 4)
@@ -57,6 +68,9 @@ TALENT_DIGEST_TZ = "America/Denver"         # Denver per Sloan location
 
 # Wall-clock-anchored cadences (Phase 5)
 VENDOR_HOUR_UTC = 6                         # daily 06:00 UTC for all 3 vendor checks
+
+# Wall-clock-anchored cadences (Phase 6)
+MERCURY_TRADE_HOUR_UTC = 8                  # daily 08:00 UTC for trade activity check
 
 
 def _daily_utc_due(now_utc: datetime, last_fire: Optional[datetime], target_hour: int) -> bool:
@@ -166,5 +180,32 @@ async def scheduler():
             except Exception as e:
                 log.exception(f"github_pat_check failed: {e}")
             last_run["github_pat"] = now
+
+        # Mercury liveness check (5min cadence; capital protection)
+        prev = last_run.get("mercury_liveness")
+        if prev is None or (now - prev).total_seconds() >= CADENCE_MERCURY_S:
+            try:
+                await mercury_liveness_check(db)
+            except Exception as e:
+                log.exception(f"mercury_liveness_check failed: {e}")
+            last_run["mercury_liveness"] = now
+
+        # Mercury real-money fail-closed (5min cadence; continuous gate)
+        prev = last_run.get("mercury_real_money")
+        if prev is None or (now - prev).total_seconds() >= CADENCE_MERCURY_S:
+            try:
+                await mercury_real_money_failclosed(db)
+            except Exception as e:
+                log.exception(f"mercury_real_money_failclosed failed: {e}")
+            last_run["mercury_real_money"] = now
+
+        # Mercury trade activity (daily 08:00 UTC; once per UTC date)
+        prev = last_run.get("mercury_trade_activity")
+        if _daily_utc_due(now, prev, MERCURY_TRADE_HOUR_UTC):
+            try:
+                await mercury_trade_activity_check(db)
+            except Exception as e:
+                log.exception(f"mercury_trade_activity_check failed: {e}")
+            last_run["mercury_trade_activity"] = now
 
         await asyncio.sleep(TICK_INTERVAL_S)
