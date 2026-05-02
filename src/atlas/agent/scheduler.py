@@ -9,6 +9,11 @@ Phase 4 Day 78 wiring (Talent operations):
 - job_search_log_check: daily at-or-after 08:00 UTC, once per UTC date
 - weekly_digest_compile: Mondays at-or-after 07:00 America/Denver, once per ISO week
 
+Phase 5 Day 78 wiring (Vendor & admin):
+- vendor_renewal_check: daily at-or-after 06:00 UTC, once per UTC date
+- tailscale_authkey_check: daily at-or-after 06:00 UTC, once per UTC date
+- github_pat_check: daily at-or-after 06:00 UTC, once per UTC date
+
 First tick at scheduler start fires all due cycles immediately (last_run empty -> due);
 wall-clock-anchored cadences fire only when the wall-clock window is open.
 Each domain call is wrapped in try/except so one failure does not poison the cadence dict
@@ -30,6 +35,11 @@ from atlas.agent.domains.talent import (
     job_search_log_check,
     weekly_digest_compile,
 )
+from atlas.agent.domains.vendor import (
+    github_pat_check,
+    tailscale_authkey_check,
+    vendor_renewal_check,
+)
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +54,9 @@ TALENT_LOG_HOUR_UTC = 8                     # daily 08:00 UTC
 TALENT_DIGEST_WEEKDAY = 0                   # 0=Monday
 TALENT_DIGEST_HOUR_LOCAL = 7                # 07:00 local
 TALENT_DIGEST_TZ = "America/Denver"         # Denver per Sloan location
+
+# Wall-clock-anchored cadences (Phase 5)
+VENDOR_HOUR_UTC = 6                         # daily 06:00 UTC for all 3 vendor checks
 
 
 def _daily_utc_due(now_utc: datetime, last_fire: Optional[datetime], target_hour: int) -> bool:
@@ -126,5 +139,32 @@ async def scheduler():
             except Exception as e:
                 log.exception(f"weekly_digest_compile failed: {e}")
             last_run["talent_digest"] = now
+
+        # Vendor renewal check (daily 06:00 UTC; once per UTC date)
+        prev = last_run.get("vendor_renewal")
+        if _daily_utc_due(now, prev, VENDOR_HOUR_UTC):
+            try:
+                await vendor_renewal_check(db)
+            except Exception as e:
+                log.exception(f"vendor_renewal_check failed: {e}")
+            last_run["vendor_renewal"] = now
+
+        # Tailscale auth key expiry check (daily 06:00 UTC; once per UTC date)
+        prev = last_run.get("tailscale_authkey")
+        if _daily_utc_due(now, prev, VENDOR_HOUR_UTC):
+            try:
+                await tailscale_authkey_check(db)
+            except Exception as e:
+                log.exception(f"tailscale_authkey_check failed: {e}")
+            last_run["tailscale_authkey"] = now
+
+        # GitHub PAT expiry check (daily 06:00 UTC; once per UTC date)
+        prev = last_run.get("github_pat")
+        if _daily_utc_due(now, prev, VENDOR_HOUR_UTC):
+            try:
+                await github_pat_check(db)
+            except Exception as e:
+                log.exception(f"github_pat_check failed: {e}")
+            last_run["github_pat"] = now
 
         await asyncio.sleep(TICK_INTERVAL_S)
