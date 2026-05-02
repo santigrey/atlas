@@ -5,13 +5,20 @@ Phase 3 Day 78 wiring (Sloan directive):
 - service_uptime_check: every 5min
 - substrate_anchor_check: hourly (3600s)
 
-First tick at scheduler start fires all due cycles immediately (last_run empty -> due).
+Phase 4 Day 78 wiring (Talent operations):
+- job_search_log_check: daily at-or-after 08:00 UTC, once per UTC date
+- weekly_digest_compile: Mondays at-or-after 07:00 America/Denver, once per ISO week
+
+First tick at scheduler start fires all due cycles immediately (last_run empty -> due);
+wall-clock-anchored cadences fire only when the wall-clock window is open.
 Each domain call is wrapped in try/except so one failure does not poison the cadence dict
 or break the next iteration.
 """
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Optional
+from zoneinfo import ZoneInfo
 
 from atlas.db import Database
 from atlas.agent.domains.infrastructure import (
@@ -19,14 +26,51 @@ from atlas.agent.domains.infrastructure import (
     substrate_anchor_check,
     system_vitals_check,
 )
+from atlas.agent.domains.talent import (
+    job_search_log_check,
+    weekly_digest_compile,
+)
 
 log = logging.getLogger(__name__)
 
-# Cadence in seconds
+# Interval-based cadences (seconds)
 CADENCE_VITALS_S = 300       # 5 minutes
 CADENCE_UPTIME_S = 300       # 5 minutes (Sloan directive Day 78; spec said 1min -- 5min ratified)
 CADENCE_ANCHOR_S = 3600      # 1 hour
 TICK_INTERVAL_S = 60         # 1-minute scheduler tick
+
+# Wall-clock-anchored cadences (Phase 4)
+TALENT_LOG_HOUR_UTC = 8                     # daily 08:00 UTC
+TALENT_DIGEST_WEEKDAY = 0                   # 0=Monday
+TALENT_DIGEST_HOUR_LOCAL = 7                # 07:00 local
+TALENT_DIGEST_TZ = "America/Denver"         # Denver per Sloan location
+
+
+def _daily_utc_due(now_utc: datetime, last_fire: Optional[datetime], target_hour: int) -> bool:
+    """True if now_utc is at-or-after target_hour UTC today AND we haven't fired today."""
+    if now_utc.hour < target_hour:
+        return False
+    if last_fire is None:
+        return True
+    return last_fire.date() != now_utc.date()
+
+
+def _weekly_local_due(
+    now_utc: datetime,
+    last_fire: Optional[datetime],
+    weekday: int,
+    target_hour: int,
+    tz_name: str,
+) -> bool:
+    """True if local-now matches weekday + at-or-after target_hour AND we haven't fired this ISO week."""
+    tz = ZoneInfo(tz_name)
+    local_now = now_utc.astimezone(tz)
+    if local_now.weekday() != weekday or local_now.hour < target_hour:
+        return False
+    if last_fire is None:
+        return True
+    last_fire_local = last_fire.astimezone(tz)
+    return last_fire_local.isocalendar()[:2] != local_now.isocalendar()[:2]
 
 
 async def scheduler():
@@ -62,5 +106,25 @@ async def scheduler():
             except Exception as e:
                 log.exception(f"substrate_anchor_check failed: {e}")
             last_run["anchor"] = now
+
+        # Talent log check (daily 08:00 UTC; once per UTC date)
+        prev = last_run.get("talent_log")
+        if _daily_utc_due(now, prev, TALENT_LOG_HOUR_UTC):
+            try:
+                await job_search_log_check(db)
+            except Exception as e:
+                log.exception(f"job_search_log_check failed: {e}")
+            last_run["talent_log"] = now
+
+        # Talent weekly digest (Mondays 07:00 America/Denver; once per ISO week)
+        prev = last_run.get("talent_digest")
+        if _weekly_local_due(
+            now, prev, TALENT_DIGEST_WEEKDAY, TALENT_DIGEST_HOUR_LOCAL, TALENT_DIGEST_TZ
+        ):
+            try:
+                await weekly_digest_compile(db)
+            except Exception as e:
+                log.exception(f"weekly_digest_compile failed: {e}")
+            last_run["talent_digest"] = now
 
         await asyncio.sleep(TICK_INTERVAL_S)
