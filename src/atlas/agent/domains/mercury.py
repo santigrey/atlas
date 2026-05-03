@@ -7,7 +7,9 @@ Four functions per spec lines 395-447 + Atlas SOP v1.0:
   Tier 2 warn if mercury-scanner active but no trades in last 7 days.
 - mercury_real_money_failclosed: every 5min; cross-host PG read for paper_trade=false;
   Tier 3 critical IMMEDIATELY unless ratification doc exists at canonical CK path.
-- mercury_start / mercury_stop: STUB at v0.1 (Paco-preferred option a); TODO Phase 7.
+- mercury_start / mercury_stop: Phase 7 (Day 78 mid-day) -- 15s Tier 2 cancel-window
+  via communication.emit_event; ssh+sudo systemctl exec on CK after window elapses
+  without cancel claim.
 
 Cross-host architecture (Path B refined; ratified Day 78 morning):
 - atlas runs on Beast; mercury.* schema lives on CK Postgres (192.168.1.10).
@@ -50,13 +52,15 @@ introduce read-only mercury_reader role.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shlex
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from atlas.db import Database
+from atlas.agent.communication import emit_event
 from atlas.agent.domains.infrastructure import _create_monitoring_task, _ssh_run
 from atlas.agent.domains.vendor import _alert_already_today
 
@@ -71,6 +75,11 @@ RATIFICATION_DOC_PATH = "/home/jes/control-plane/docs/mercury_real_money_ratific
 
 # Trade activity threshold
 TRADE_ACTIVITY_GAP_DAYS = 7
+
+# Phase 7.2: Tier 2 cancel-window duration (seconds) for mercury_start/mercury_stop.
+# Per directive section 2.3 (Day 78 mid-day): 15s window; cancel claim detection is
+# polled every 1s within the window so an early cancel aborts before the full sleep.
+_CANCEL_WINDOW_S = 15
 
 # Static read-only SQL queries (PD-authored module-level constants; no user input).
 # Using ::text cast on timestamps to ensure stable JSON-serializable string output
@@ -337,25 +346,117 @@ async def mercury_real_money_failclosed(db: Database) -> None:
     )
 
 
-async def mercury_start(db: Database) -> None:
-    """STUB: invoke `ssh ck sudo systemctl start mercury-scanner.service`.
+async def _mercury_control(db: Database, action: str) -> None:
+    """Execute mercury start|stop with Tier 2 cancel-window.
 
-    v0.1: log-only stub. Not wired into any cadence. Will be invoked by future
-    atlas.tasks claim with kind='mercury_control' once the dispatch path exists.
-    Tier 2 cancel-window enforcement requires emit_event helper from Phase 7.
+    Phase 7.2 (Day 78 mid-day): replaces v0.1 no-op stubs.
 
-    TODO(Phase 7): implement real start with cancel-window via communication.py.
+    Workflow:
+        1. Capture window_start = now (UTC); compute window_end = window_start + 15s.
+        2. emit_event Tier 2 atlas.events row (kind='mercury_control_initiated';
+           payload includes action, window_start_iso, window_end_iso, cancel_via).
+        3. Polled cancel-window: 15 iterations of 1s sleep + cancel-claim check.
+           Each iteration: query atlas.tasks for cancel claim; if found, abort + emit
+           Tier 1 'mercury_control_cancelled' + return.
+        4. After window: invoke `_ssh_run(CK_HOST, CK_USER, f'sudo systemctl {action} mercury-scanner.service')`.
+        5. emit_event Tier 1 atlas.events row (kind='mercury_control_executed' with
+           payload.outcome='executed'|'ssh_error'|'systemctl_error').
+
+    Cancel claim detection (per directive section 0 correction #2):
+        SELECT id FROM atlas.tasks
+        WHERE payload->>'kind' = 'mercury_control_cancel'
+          AND created_at > %s   -- window_start
+          AND status = 'pending'
+        LIMIT 1
+
+    On match: also UPDATE atlas.tasks SET status='done' for that row (caller-side
+    idempotency; cancel claim is consumed once observed).
     """
-    log.info("mercury_start v0.1 stub (no-op; Phase 7 wires real start with cancel-window)")
+    assert action in ("start", "stop"), f"_mercury_control: action must be start|stop, got {action!r}"
+    window_start = datetime.now(timezone.utc)
+    window_end = window_start + timedelta(seconds=_CANCEL_WINDOW_S)
+    log.info(f"mercury_control_initiated action={action} window_s={_CANCEL_WINDOW_S}")
+    await emit_event(
+        db,
+        source="atlas.mercury",
+        kind="mercury_control_initiated",
+        severity="warn",
+        payload={
+            "action": action,
+            "window_start_iso": window_start.isoformat(),
+            "window_end_iso": window_end.isoformat(),
+            "cancel_via": (
+                "INSERT INTO atlas.tasks (status, payload) VALUES "
+                "('pending', '{\"kind\":\"mercury_control_cancel\"}'::jsonb)"
+            ),
+        },
+    )
+    # Polled cancel-window: _CANCEL_WINDOW_S iterations of 1s sleep + cancel check
+    cancelled = False
+    cancel_id: Any = None
+    for _ in range(_CANCEL_WINDOW_S):
+        await asyncio.sleep(1)
+        async with db.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id FROM atlas.tasks "
+                    "WHERE payload->>'kind' = 'mercury_control_cancel' "
+                    "  AND created_at > %s "
+                    "  AND status = 'pending' "
+                    "LIMIT 1",
+                    (window_start,),
+                )
+                row = await cur.fetchone()
+                if row is not None:
+                    cancel_id = row[0]
+                    # Consume the cancel claim
+                    await cur.execute(
+                        "UPDATE atlas.tasks SET status='done', updated_at=now() WHERE id=%s",
+                        (cancel_id,),
+                    )
+                    await conn.commit()
+                    cancelled = True
+                    break
+    if cancelled:
+        await emit_event(
+            db,
+            source="atlas.mercury",
+            kind="mercury_control_cancelled",
+            severity="info",
+            payload={"action": action, "cancel_task_id": str(cancel_id)},
+        )
+        log.info(f"mercury_control_cancelled action={action} cancel_task_id={cancel_id}")
+        return
+    # Window elapsed without cancel; execute via SSH+sudo systemctl on CK
+    rc, out, err = await _ssh_run(
+        CK_HOST, CK_USER, f"sudo systemctl {action} {MERCURY_SERVICE}"
+    )
+    if rc == 0:
+        outcome = "executed"
+    elif rc < 0:
+        outcome = "ssh_error"
+    else:
+        outcome = "systemctl_error"
+    await emit_event(
+        db,
+        source="atlas.mercury",
+        kind="mercury_control_executed",
+        severity="info",
+        payload={
+            "action": action,
+            "outcome": outcome,
+            "rc": rc,
+            "stderr": (err[:500] if err else ""),
+        },
+    )
+    log.info(f"mercury_control_executed action={action} outcome={outcome} rc={rc}")
+
+
+async def mercury_start(db: Database) -> None:
+    """Phase 7.2 (Day 78 mid-day): real start with 15s cancel-window via _mercury_control."""
+    await _mercury_control(db, "start")
 
 
 async def mercury_stop(db: Database) -> None:
-    """STUB: invoke `ssh ck sudo systemctl stop mercury-scanner.service`.
-
-    v0.1: log-only stub. Not wired into any cadence. Will be invoked by future
-    atlas.tasks claim with kind='mercury_control' once the dispatch path exists.
-    Tier 2 cancel-window enforcement requires emit_event helper from Phase 7.
-
-    TODO(Phase 7): implement real stop with cancel-window via communication.py.
-    """
-    log.info("mercury_stop v0.1 stub (no-op; Phase 7 wires real stop with cancel-window)")
+    """Phase 7.2 (Day 78 mid-day): real stop with 15s cancel-window via _mercury_control."""
+    await _mercury_control(db, "stop")
