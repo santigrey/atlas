@@ -15,6 +15,9 @@ from atlas.db import Database
 from atlas.mcp_client import McpClient
 
 
+pytestmark = pytest.mark.homelab
+
+
 @pytest.mark.asyncio
 async def test_token_logging_no_arg_values() -> None:
     db = Database()

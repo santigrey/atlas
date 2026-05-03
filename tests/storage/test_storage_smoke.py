@@ -1,11 +1,15 @@
 """Cycle 1C smoke: connect to Garage, list buckets including expected 3."""
 
+import pytest
+
 from atlas.storage import (
     BUCKET_ARTIFACTS,
     BUCKET_ATLAS_STATE,
     BUCKET_BACKUPS,
     S3Storage,
 )
+
+pytestmark = pytest.mark.homelab
 
 
 def test_list_buckets_includes_expected() -> None:

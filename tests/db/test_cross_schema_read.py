@@ -5,6 +5,9 @@ import pytest
 from atlas.db import Database
 
 
+pytestmark = pytest.mark.homelab
+
+
 @pytest.mark.asyncio
 async def test_read_public_agent_tasks() -> None:
     db = Database()

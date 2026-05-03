@@ -5,6 +5,9 @@ import pytest
 from atlas.embeddings import EmbeddingClient
 
 
+pytestmark = pytest.mark.homelab
+
+
 @pytest.mark.asyncio
 async def test_cache_hit_returns_same_vector() -> None:
     async with EmbeddingClient() as client:

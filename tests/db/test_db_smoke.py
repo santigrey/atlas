@@ -5,6 +5,9 @@ import pytest
 from atlas.db import Database
 
 
+pytestmark = pytest.mark.homelab
+
+
 @pytest.mark.asyncio
 async def test_connect_and_select_one() -> None:
     db = Database()

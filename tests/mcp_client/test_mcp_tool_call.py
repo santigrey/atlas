@@ -5,6 +5,9 @@ import pytest
 from atlas.mcp_client import McpClient
 
 
+pytestmark = pytest.mark.homelab
+
+
 @pytest.mark.asyncio
 async def test_homelab_ssh_run_whoami() -> None:
     async with McpClient() as client:

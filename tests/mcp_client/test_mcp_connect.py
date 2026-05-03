@@ -5,6 +5,9 @@ import pytest
 from atlas.mcp_client import McpClient
 
 
+pytestmark = pytest.mark.homelab
+
+
 @pytest.mark.asyncio
 async def test_connect_and_list_tools() -> None:
     async with McpClient() as client:

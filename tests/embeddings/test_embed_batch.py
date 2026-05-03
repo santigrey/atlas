@@ -5,6 +5,9 @@ import pytest
 from atlas.embeddings import EMBED_DIM, EmbeddingClient
 
 
+pytestmark = pytest.mark.homelab
+
+
 @pytest.mark.asyncio
 async def test_batch_embed_returns_n_vectors() -> None:
     async with EmbeddingClient() as client:

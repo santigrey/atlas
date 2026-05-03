@@ -5,6 +5,9 @@ import pytest
 from atlas.inference import GoliathClient, MODEL_QWEN_72B
 
 
+pytestmark = pytest.mark.homelab
+
+
 @pytest.mark.asyncio
 async def test_sync_generate_qwen_72b() -> None:
     async with GoliathClient() as client:

@@ -2,7 +2,11 @@
 
 import uuid
 
+import pytest
+
 from atlas.storage import BUCKET_ATLAS_STATE, S3Storage
+
+pytestmark = pytest.mark.homelab
 
 
 def test_put_head_get_delete_roundtrip() -> None:

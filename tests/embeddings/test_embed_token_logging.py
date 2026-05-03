@@ -6,6 +6,9 @@ from atlas.db import Database
 from atlas.embeddings import EmbeddingClient
 
 
+pytestmark = pytest.mark.homelab
+
+
 @pytest.mark.asyncio
 async def test_embed_inserts_atlas_events_row() -> None:
     db = Database()

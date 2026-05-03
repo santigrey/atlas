@@ -29,6 +29,9 @@ from atlas.db import Database
 TEST_CANCEL_WINDOW_S = 3
 
 
+pytestmark = pytest.mark.homelab
+
+
 async def _cleanup_test_events(db: Database, source_prefix: str) -> None:
     """Delete atlas.events rows written during a test."""
     async with db.connection() as conn:

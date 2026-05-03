@@ -6,6 +6,9 @@ from atlas.db import Database
 from atlas.inference import GoliathClient, MODEL_QWEN_72B
 
 
+pytestmark = pytest.mark.homelab
+
+
 @pytest.mark.asyncio
 async def test_token_logging_inserts_event() -> None:
     db = Database()

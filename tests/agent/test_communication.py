@@ -37,6 +37,7 @@ from atlas.db import Database
 # 1. severity validation
 # -----------------------------------------------------------------------------
 
+@pytest.mark.homelab
 @pytest.mark.asyncio
 async def test_emit_event_severity_validation() -> None:
     """emit_event with severity not in {info, warn, critical} raises ValueError."""
@@ -59,6 +60,7 @@ async def test_emit_event_severity_validation() -> None:
 # 2. INSERT writes correct row to atlas.events
 # -----------------------------------------------------------------------------
 
+@pytest.mark.homelab
 @pytest.mark.asyncio
 async def test_emit_event_inserts_atlas_events(monkeypatch: pytest.MonkeyPatch) -> None:
     """emit_event inserts row with source/kind + payload (incl severity + tier)."""
@@ -103,6 +105,7 @@ async def test_emit_event_inserts_atlas_events(monkeypatch: pytest.MonkeyPatch) 
 # 3. tier mapping (parametrized across 3 severities)
 # -----------------------------------------------------------------------------
 
+@pytest.mark.homelab
 @pytest.mark.asyncio
 @pytest.mark.parametrize("severity,expected_tier", [("info", 1), ("warn", 2), ("critical", 3)])
 async def test_emit_event_tier_mapping(
@@ -148,6 +151,7 @@ async def test_emit_event_tier_mapping(
 # 4. dispatch_telegram called only on critical
 # -----------------------------------------------------------------------------
 
+@pytest.mark.homelab
 @pytest.mark.asyncio
 @pytest.mark.parametrize("severity,should_call", [("info", False), ("warn", False), ("critical", True)])
 async def test_emit_event_critical_calls_dispatch(

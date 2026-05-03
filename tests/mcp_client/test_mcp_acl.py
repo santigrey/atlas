@@ -5,6 +5,9 @@ import pytest
 from atlas.mcp_client import AtlasAclDenied, McpClient
 
 
+pytestmark = pytest.mark.homelab
+
+
 @pytest.mark.asyncio
 async def test_acl_denies_control_plane_write() -> None:
     async with McpClient() as client:

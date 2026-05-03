@@ -1,8 +1,11 @@
-"""Cycle 1B smoke: run migrations, verify atlas schema + 4 tables."""
+"""Cycle 1B smoke: run migrations, verify atlas schema + 5 tables (vendors added Phase 5)."""
 
 import pytest
 
 from atlas.db import Database, run_migrations
+
+
+pytestmark = pytest.mark.homelab
 
 
 @pytest.mark.asyncio
@@ -24,6 +27,6 @@ async def test_migrations_idempotent() -> None:
                     "WHERE schemaname='atlas' ORDER BY tablename"
                 )
                 tables = [row[0] for row in await cur.fetchall()]
-                assert tables == ["events", "memory", "schema_version", "tasks"]
+                assert tables == ["events", "memory", "schema_version", "tasks", "vendors"]
     finally:
         await db.close()

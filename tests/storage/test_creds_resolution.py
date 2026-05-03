@@ -5,6 +5,9 @@ import pytest
 from atlas.storage.creds import get_s3_creds
 
 
+pytestmark = pytest.mark.homelab
+
+
 def test_file_resolution_default_path() -> None:
     """Default file path resolves successfully (canonical .s3-creds reachable)."""
     creds = get_s3_creds()
