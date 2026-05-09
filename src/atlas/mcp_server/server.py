@@ -5,6 +5,7 @@ this with the Tailscale-issued FQDN cert at /etc/ssl/tailscale/.
 
 Cycle 1H ships 4 read/write tools:
 - atlas_events_search       (READ)
+- atlas_events_create       (WRITE; thin INSERT, no Tier dispatch)
 - atlas_memory_query        (READ)
 - atlas_memory_upsert       (WRITE)
 - atlas_inference_history   (READ)
@@ -42,9 +43,10 @@ from mcp.server.fastmcp import Context, FastMCP
 from atlas.db import Database
 from atlas.mcp_server.acl import AtlasMcpServerAclDenied, check_server_acl
 from atlas.mcp_server.errors import AtlasTaskStateError
-from atlas.mcp_server.events import search_events
+from atlas.mcp_server.events import create_event, search_events
 from atlas.mcp_server.inference import history_inference
 from atlas.mcp_server.inputs import (
+    EventsCreateInput,
     EventsSearchInput,
     InferenceHistoryInput,
     MemoryQueryInput,
@@ -263,6 +265,16 @@ async def atlas_events_search(params: EventsSearchInput, ctx: Context) -> str:
     """Search atlas.events by source / kind / ts range. Returns rows ordered by ts DESC."""
     rows = await _wrap_tool("atlas_events_search", params, ctx, search_events)
     return json.dumps(rows, default=str, indent=2)
+
+
+@mcp.tool(
+    name="atlas_events_create",
+    description="INSERT one row into atlas.events. Thin write; no Tier dispatch."
+)
+async def atlas_events_create(params: EventsCreateInput, ctx: Context) -> str:
+    """MCP wrapper for create_event."""
+    result = await _wrap_tool("atlas_events_create", params, ctx, create_event)
+    return json.dumps(result, default=str)
 
 
 @mcp.tool(

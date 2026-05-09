@@ -8,7 +8,7 @@ patterns live in acl.py as defense-in-depth.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -75,6 +75,22 @@ class EventsSearchInput(BaseModel):
                 f"source must be one of {sorted(EVENTS_SOURCE_ALLOWLIST)} or None"
             )
         return v
+
+
+
+
+class EventsCreateInput(BaseModel):
+    """atlas_events_create: thin INSERT into atlas.events.
+
+    Caller supplies source/kind/payload. NO Tier-1/2/3 dispatch logic
+    (Telegram dispatch lives in agent/communication.emit_event for
+    Atlas-internal callers; MCP callers handle dispatch via their own paths).
+    """
+    source: str = Field(..., min_length=1, max_length=128, description="Event source label, e.g. 'alexandra.dashboard', 'mr_robot.suricata'")
+    kind: str = Field(..., min_length=1, max_length=128, description="Event kind, e.g. 'user_login', 'rule_match'")
+    payload: dict[str, Any] = Field(default_factory=dict, description="Arbitrary JSONB payload")
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class MemoryQueryInput(BaseModel):

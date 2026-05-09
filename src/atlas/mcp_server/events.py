@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from atlas.db import Database
-from atlas.mcp_server.inputs import EventsSearchInput
+from atlas.mcp_server.inputs import EventsCreateInput, EventsSearchInput
 
 
 async def search_events(params: EventsSearchInput, db: Database) -> list[dict[str, Any]]:
@@ -55,3 +55,24 @@ async def search_events(params: EventsSearchInput, db: Database) -> list[dict[st
         }
         for r in rows
     ]
+
+
+async def create_event(params: EventsCreateInput, db: Database) -> dict[str, Any]:
+    """INSERT one row into atlas.events. Thin write -- no Tier dispatch.
+
+    Returns: {"id": <new id>, "ts": <server-default ts>}.
+    """
+    import json
+    sql = (
+        "INSERT INTO atlas.events (source, kind, payload) "
+        "VALUES (%s, %s, %s::jsonb) RETURNING id, ts"
+    )
+    args = (params.source, params.kind, json.dumps(params.payload, default=str))
+
+    async with db.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(sql, args)
+            row = await cur.fetchone()
+            await conn.commit()
+
+    return {"id": row[0], "ts": row[1]}
