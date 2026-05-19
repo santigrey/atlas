@@ -7,6 +7,7 @@ to correct 5 directive-author errors: (1) get_pool->Database, (2) asyncpg->psyco
 + payload.kind extraction (kind lives inside payload jsonb, no top-level column).
 """
 import asyncio
+import json
 import logging
 from atlas.db import Database
 
@@ -34,13 +35,27 @@ async def task_poller():
             await asyncio.sleep(5)  # 5-second cadence per Pick 2
             continue
         task_id, payload = row[0], row[1]
-        log.info(f'Claimed task {task_id} payload_kind={payload.get("kind") if isinstance(payload, dict) else None}')
-        # Dispatch to handler (TODO Phase 3+: domain-specific handlers)
-        # For now, mark as done with no-op handler
-        async with db.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "UPDATE atlas.tasks SET status='done', updated_at=now() WHERE id=%s",
-                    (task_id,)
-                )
-                await conn.commit()
+        kind = payload.get("kind") if isinstance(payload, dict) else None
+        log.info(f'Claimed task {task_id} payload_kind={kind}')
+        if kind == "deebo_dispatch":
+            from atlas.agent.domains.deebo import execute_deebo_task
+            try:
+                await execute_deebo_task(task_id, payload, db)
+            except Exception as e:
+                log.exception(f"deebo_dispatch task {task_id} crashed: {e}")
+                async with db.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "UPDATE atlas.tasks SET status='failed', result=%s, updated_at=now() WHERE id=%s",
+                            (json.dumps({"error": f"poller crash: {type(e).__name__}: {str(e)[:300]}"}), task_id),
+                        )
+                        await conn.commit()
+        else:
+            # existing no-op fall-through (preserves current behavior for any other producer)
+            async with db.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE atlas.tasks SET status='done', updated_at=now() WHERE id=%s",
+                        (task_id,)
+                    )
+                    await conn.commit()
